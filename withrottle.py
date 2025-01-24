@@ -1,13 +1,19 @@
 # withrottle.py
 # Michel RAULET 2025
-# Version 1.0
+# Version 1.1
 
 # 10-01-2025 first prototype
 # 11-01-2025 first usable program
 # 13-01-2025 refactoring
 # 15-01-2025 adding Locomotive class (overall 675 lines)
-# 17-01-2025 Complete (780 lines, comments included)
+# 17-01-2025 complete (780 lines, comments included)
+# 18-01=2025 inprovements
+# 19-01-2025 high level keyboard methods to simplify menu structure
+# 19-01-2025 display table for registered locos (865 lines)
 
+# TODO:
+# Idle command
+# (un)register all locos from the roster ?
 
 """
 
@@ -48,20 +54,16 @@ import threading # for Thread
 
 TCP_IP = '127.0.0.1'
 TCP_PORT = 12090
-BUFFER_SIZE = 1024 # be careful in PyWiThrottle class
+BUFFER_SIZE = 1024
 CRED,CGRE,CORA,CBLU,CEND = '\033[91m','\033[32m','\033[33m','\033[94m','\033[0m'
 
 #################################################
 # Variables globales
 
-# TODO: useless
-scanning = True # False stops files and queue scanning
 
 #################################################
 
 class wiThrottleManager(object):
-
-    # throttles = {} # class attribute
 
     def __init__(self,client_name,server_ip,server_port,verbose=True):
         self.client_name = client_name # ex. 'MraThrottle'
@@ -71,30 +73,13 @@ class wiThrottleManager(object):
         self.recv_buffer_size = 2048
         self.connected = False
         self.rosterlist = [] # raw data of all locomotives defined in the roster
-        self.rosterdict = {} # all Locomotives defined in the roster
+        self.rosterdict = {} # all Locomotives data defined in the roster
         self.rosterkeys = [] # all LocoIDs (all S|L<dcc-address>)
-        self.registered_locos = [] # list of registered LocoIDs (S3 or L8504, etc)
-        self.registered_locomotives = {} # list of Locomotive objects
+        self.registered_locomotives = {} # registered Locomotive OBJECTS
         self.verbose = verbose
         self.power = None # layout power status
         # socket connection and wiThrottle server connection
         self.register_throttle()
-
-    # @classmethod
-    # def getThrottles(cls):
-    #     return cls.throttles
-
-    def display(self): # display Throttle Manager data
-        print(f"{self.client_name}:")
-        print(f"Layout Power {self.power}")
-        for loco in self.registered_locomotives:
-            self.registered_locomotives[loco].display()
-
-    def hello(self):
-        print(f"HELLO {self.client_name}")
-
-    def set_verbose(self,verbose=True):
-        self.verbose = verbose
 
     def print_trace(self,message):
         if self.verbose:
@@ -102,6 +87,31 @@ class wiThrottleManager(object):
 
     def print_error(self,error_message):
         print(f"{CRED}ERROR {self.client_name}: {error_message}{CEND}")
+
+    def display(self): # display Throttle Manager data
+        print(f"{self.client_name}")
+        print(f"Layout Power {self.power}")
+        print(f'+{'-'*5}+{'-'*9}+{'-'*5}+{'-'*71}+')      
+        print(f"|{'@':.<5s}|Direction|Speed| {'FO-68':<69} |")
+        print(f'+{'-'*5}+{'-'*9}+{'-'*5}+{'-'*71}+')      
+        for locoid in self.registered_locomotives:
+            self.registered_locomotives[locoid].display()
+        print(f'+{'-'*5}+{'-'*9}+{'-'*5}+{'-'*71}+')      
+
+    def set_verbose(self,verbose=True):
+        self.verbose = verbose
+
+    def get_registered_locos(self):
+        # registered LocoIDs (S3 or L8504, etc)
+        return list(self.registered_locomotives)
+    
+    def get_registered_locomotives(self):
+        # dictionary: key is LocoID (S3 or L8504, etc), value is Locomotive object
+        return {key: obj for key, obj in self.registered_locomotives.items() if obj.registered}
+
+
+#################################################
+# Throttle Manager TCP communication
 
     def sendwt(self,order):
         # we should send BYTES, not string
@@ -118,10 +128,10 @@ class wiThrottleManager(object):
             self.print_error(f"sendwt: {self.client_name} not connected")
             # sendwt: MraThrottle not connected
 
-    def readwt(self,evt):
+    def readwt(self,stop):
         self.print_trace(f"Socket read loop with {self}")
         data = ""
-        while self.connected and not evt.is_set():
+        while self.connected and not stop.is_set():
             try:
                 octets = self.cx.recv(BUFFER_SIZE)
                 mystring = octets.decode('ascii') # utf-8 or ascii ?
@@ -168,7 +178,7 @@ class wiThrottleManager(object):
                 break
 
 #################################################
-# Throttle Manager methods
+# Throttle Manager protocol methods
 
     def connectwt(self):
         self.cx = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -193,7 +203,26 @@ class wiThrottleManager(object):
 
     def check_locoid(self,locoid):
         # locoid is a string like S2,S3,S8,L8504
-        return locoid in self.rosterkeys
+        return locoid is not None and locoid in self.rosterkeys
+
+    def select_registered_loco_keyboard(self):
+        # return one registered locoid or None
+        if len(self.get_registered_locos()) == 0:
+            print("Please, register at least one locomotive!")
+            return
+        txt = input(f"-> Loco Index [1-{len(self.get_registered_locos())}]: ")
+        isn = re.match(r"\d+",txt)
+        if isn is None:
+            self.print_error(f"OUPS Index not integer!")
+            return
+        else:
+            num = int(txt)
+            if num < 1 or num > len(self.get_registered_locos()):
+                self.print_error(f"OUPS Index {num} out of bounds!")
+                # raise(InvalidLoco)
+                return
+        onelocoid = self.get_registered_locos()[num-1]
+        return onelocoid
 
     def add_locomotive(self,locoid):
         # request to add a new locomotive to the multithrottle
@@ -202,14 +231,29 @@ class wiThrottleManager(object):
         if self.check_locoid(locoid) == False:
             self.print_error(f"LocoID {locoid} is not part of the roster!")
             return
-        if locoid in self.registered_locos:
+        if locoid in self.get_registered_locos():
             self.print_error(f"LocoID {locoid} is already registered!")
             return
         reg_data = f"MX+{locoid}<;>{locoid}"
         print(f"OK Registering Loco {locoid}")
         self.sendwt(reg_data)
-        self.registered_locos.append(locoid)
         self.registered_locomotives[locoid] = Locomotive(locoid)
+
+    def add_locomotive_keyboard(self):
+        if len(self.rosterkeys) == 0:
+            self.print_error(f"OUPS Roster empty!")
+            return
+        self.print_roster() # TODO: roster w/o registered locos...
+        txt = input(f"-> Loco Index [1-{len(self.rosterkeys)}]: ")
+        isn = re.match(r"\d+",txt)
+        if isn is None:
+            self.print_error(f"OUPS Index not integer!")
+            return
+        num = int(txt)
+        if num < 1 or num > len(self.rosterkeys):
+            self.print_error(f"OUPS Index {num} out of bounds!")
+            return
+        self.add_locomotive(self.rosterkeys[num-1])
 
     def remove_locomotive(self,locoid):
         # MT-
@@ -217,14 +261,19 @@ class wiThrottleManager(object):
         if self.check_locoid(locoid) == False:
             self.print_error(f"LocoID {locoid} is not part of the roster!")
             return
-        if locoid not in self.registered_locos:
+        if locoid not in self.get_registered_locos():
             self.print_error(f"LocoID {locoid} is not registered!")
             return
         reg_data = f"MX-{locoid}<;>r"
         print(f"OK Removing Loco {locoid} from registered locos")
         self.sendwt(reg_data)
-        self.registered_locos.remove(locoid)
         self.registered_locomotives.pop(locoid)
+
+    def remove_locomotive_keyboard(self):
+        # remove loco from throttle
+        onelocoid = self.select_registered_loco_keyboard()
+        if onelocoid is not None:
+            self.remove_locomotive(onelocoid)
 
     def add_locomotive_Notification(self):
         # After sending add command,
@@ -238,16 +287,16 @@ class wiThrottleManager(object):
         # MT-L341<;>
         pass
 
-    def roster(self, data_in):
+    def roster(self,rawline):
         # if re.match("RL(.*)",line):
         # examples:
         # RL0
         # RL2]\[RGS 41}|{41}|{L]\[Test Loco}|{1234}|{L
         # RL3]\[D&RGW 341}|{3}|{S]\[RGS 41}|{41}|{L]\[Test Loco}|{1234}|{L   
         self.rosterlist = []
-        if data_in == 'RL0':
+        if rawline == 'RL0':
             return
-        parse = re.search(r'RL([0-9]+)\]\\\[(.*)',data_in)
+        parse = re.search(r'RL([0-9]+)\]\\\[(.*)',rawline)
         if parse is not None:
             for entry in parse.group(2).split(r']\['):
                 self.rosterlist.append(entry.split('}|{'))
@@ -262,7 +311,7 @@ class wiThrottleManager(object):
     def print_roster(self):
         print(f"Roster: {self.rosterkeys}")
 
-    def turnoutstate(self, data_in):
+    def turnoutStateLabels(self,rawline): # TODO: this code is not tested!
         # if re.match("PTT(.*)",line)
         # JMRI returns either zero, one, or two strings for this section.
         # The first string provides the labels for the different turnout states.
@@ -271,13 +320,13 @@ class wiThrottleManager(object):
         # PTT]\[Turnouts}|{Turnout]\[Closed}|{2]\[Thrown}|{4]\[Unknown}|{1]\[Inconsistent}|{8
         print("Turnout status:")
         self.turnoutstates = {}
-        for entry in data_in[6:].split(r']\['):
+        for entry in rawline[6:].split(r']\['):
             entrylist = entry.split('}|{')
             if entrylist[1] != 'Turnout':
                 self.turnoutstates[entrylist[1]] = entrylist[0]
         print(self.turnoutstates)
 
-    def turnout(self, data_in):
+    def turnouts(self,rawline): # TODO: this code is not tested!
         # if re.match("PTL(.*)",line)
         # JMRI returns either zero, one, or two strings for this section.
         # The second string appears when you have turnouts defined in JMRI,
@@ -285,7 +334,7 @@ class wiThrottleManager(object):
         # PTL]\[LT12}|{Rico Station N}|{1]\[LT324}|{Rico Station S}|{2
         print("Turnout list:")
         self.turnouts = {}
-        for entry in data_in[6:].split(r']\['):
+        for entry in rawline[6:].split(r']\['):
             entrylist = entry.split('}|{')
             if entrylist[1]:
                 self.turnouts[entrylist[1]] = {
@@ -298,7 +347,7 @@ class wiThrottleManager(object):
                         'state': entrylist[2]}
         print(self.turnouts)
 
-    def route(self, data_in):
+    def routeValueLabels(self,rawline): # TODO: this code is not tested!
         # if re.match("PRT(.*)",line)
         # JMRI returns either zero, one, or two strings for this section.
         # The first string is likewise a list of labels for the route values.
@@ -306,7 +355,7 @@ class wiThrottleManager(object):
         print("Route list:")
         routelist = []
         routes = {}
-        for entry in data_in[6:].split(r']\['): # noqa W605
+        for entry in rawline[6:].split(r']\['): # noqa W605
             entrylist = entry.split('}|{')
             routelist.append(entrylist)
             if entrylist[1]:
@@ -447,9 +496,40 @@ class wiThrottleManager(object):
         # functionid is INTEGER
         # state is INTEGER
         # MTAL8504<;>F02
+        if locoid not in self.get_registered_locos():
+            self.print_error(f"LocoID {locoid} is not registered!")
+            return
         print(f"OK Setting function {functionid} of {locoid} to {state}")
         reg_data = f"MXA{locoid}<;>F{state}{functionid:02d}"
         self.sendwt(reg_data)
+
+    def set_function_push_release(self,locoid,functionid):
+        # SET (to 1) is relevant for switch buttons AND for push buttons !
+        # if one send set two times,
+        # wiThrottle server does automatically consider activation first and unsetting second,
+        # the same behavior for switchs and push buttons
+        # to be compliant with the protocol, we should systematically set on then release.
+        self.set_function(locoid,functionid,1)
+        time.sleep(1)
+        self.set_function(locoid,functionid,0)      
+
+    def set_function_keyboard(self):
+        onelocoid = self.select_registered_loco_keyboard()
+        if onelocoid is not None:
+            txt = input(f"-> Push button [0-28] : ")
+            isn = re.match(r"\d+",txt)
+            if isn is None:
+                self.print_error(f"OUPS Button not integer!")
+                return
+            else:
+                num = int(txt)
+                if num < 0 or num > 28:
+                    self.print_error(f"OUPS Button {num} out of bounds!")
+                    return
+            # self.set_function(onelocoid,num,1)
+            # time.sleep(1)
+            # self.set_function(onelocoid,num,0)
+            self.set_function_push_release(onelocoid,num)
 
     def functionNotification(self,locoid,value):
         # locoid is a string like S2,S3,S8,L8504
@@ -466,6 +546,9 @@ class wiThrottleManager(object):
         # locoid is a string like S2,S3,S8,L8504
         # speed is INTEGER (requested speed)
         # MTA*<;>V30
+        if locoid not in self.get_registered_locos():
+            self.print_error(f"LocoID {locoid} is not registered!")
+            return
         speed = max(0,min(126,speed))
         reg_data = f"MXA{locoid}<;>V{speed}"
         print(f"OK Setting speed of {locoid} to {speed}")
@@ -474,17 +557,63 @@ class wiThrottleManager(object):
         # with the same loco registered, except us!
         self.registered_locomotives[locoid].speed = str(speed) # string
 
+    def set_speed_keyboard(self):
+        onelocoid = self.select_registered_loco_keyboard()
+        if onelocoid is not None:
+            txt = input(f"-> Speed [0-126]: ")
+            isn = re.match(r"\d+",txt)
+            if isn is None:
+                self.print_error(f"OUPS Speed not integer!")
+                return
+            else:
+                num = int(txt)
+                if num < 0 or num > 126:
+                    self.print_error(f"OUPS Speed {num} out of bounds!")
+                    return
+            self.set_speed(onelocoid,num)
+
+    def set_speed_keyboard_command(self):
+        regex = re.search(r"^speed\s+([SL]\d+)\s+(\d+)",cmd)
+        if regex is not None and len(regex.groups()) == 2:
+            rdccad = regex.group(1) # requested loco dcc-address
+            rspeed = int(regex.group(2)) # requested speed
+            if rdccad not in self.rosterkeys:
+                self.print_error(f"OUPS LocoID {rdccad} does not exist in the roster!")
+                return
+            if rdccad not in self.get_registered_locos():
+                self.print_error(f"OUPS LocoID {rdccad} not registered!")
+                return
+            if rspeed < 0 or rspeed > 126:
+                self.print_error(f"OUPS Requested speed {rspeed} out of bounds [0-126]!")
+                return
+            else:
+                self.set_speed(rdccad,rspeed)
+        else:
+            self.print_error(f"OUPS Bad request! (use speed S|L<dcc-address> <requested-speed>)")
+
     def query_speed(self,locoid='*'):
         # Used to request the current values of speed (V)
         # locoid is a string like S2,S3,S8,L8504
         # locoid could be 'star' to address all locomotives
         # M0A*<;>qV
+        if len(self.get_registered_locos()) == 0:
+            self.print_error(f"Found no locomotive registered!")
+            return
+        if locoid != '*':
+            if locoid not in self.get_registered_locos():
+                self.print_error(f"LocoID {locoid} is not registered!")
+                return
         print(f"OK Querying speed of {locoid}")
         reg_data = f"MXA{locoid}<;>qV"
         self.sendwt(reg_data)
 
     def get_speed(self,locoid):
         return self.registered_locomotives[locoid].speed # string
+    
+    def get_speed_keyboard(self):
+        onelocoid = self.select_registered_loco_keyboard()
+        if onelocoid is not None:
+            print(self.get_speed(onelocoid))
 
     def speedNotification(self,locoid,value):
         # locoid is a string like S2,S3,S8,L8504
@@ -502,6 +631,9 @@ class wiThrottleManager(object):
         # direction is INTEGER
         # - Forward = 1
         # - Reverse = 0
+        if locoid not in self.get_registered_locos():
+            self.print_error(f"LocoID {locoid} is not registered!")
+            return
         if direction in [0,1]:
             print(f"OK Changing direction of {locoid} to {direction}")
             reg_data = f"MXA{locoid}<;>R{direction}"
@@ -509,11 +641,27 @@ class wiThrottleManager(object):
         # not necessary to update data in Locomotive object because JMRI
         # is always sending notifications to us
 
+    def set_direction_keyboard(self):
+        onelocoid = self.select_registered_loco_keyboard()
+        if onelocoid is not None:
+            txt = input(f"-> Direction (f:Forward or r:Reverse) : ")
+            if txt not in ['f','r']:
+                self.print_error(f"OUPS Direction \'{txt}\' out of bounds!")
+                return
+            self.set_direction(onelocoid,1 if txt == 'f' else 0)
+
     def query_direction(self,locoid='*'):
         # Used to request the current values of direction (R)
         # locoid is a string like S2,S3,S8,L8504
         # locoid could be 'star' to address all locomotives
         # M0A*<;>qR
+        if len(self.get_registered_locos()) == 0:
+            self.print_error(f"Found no locomotive registered!")
+            return
+        if locoid != '*':
+            if locoid not in self.get_registered_locos():
+                self.print_error(f"LocoID {locoid} is not registered!")
+                return
         print(f"OK Querying direction of {locoid}")
         reg_data = f"MXA{locoid}<;>qR"
         self.sendwt(reg_data)
@@ -521,7 +669,12 @@ class wiThrottleManager(object):
     def get_direction(self,locoid):
         direction = self.registered_locomotives[locoid].direction # string
         return "forward" if direction == '1' else "reverse"
-
+    
+    def get_direction_keyboard(self):
+        onelocoid = self.select_registered_loco_keyboard()
+        if onelocoid is not None:
+            print(self.get_direction(onelocoid))
+ 
     def directionNotification(self,locoid,value):
         # locoid is a string like S2,S3,S8,L8504
         # value in ['0','1']
@@ -534,9 +687,21 @@ class wiThrottleManager(object):
         # locoid is a string like S2,S3,S8,L8504
         # no documentation provided
         # MTAL8504<;>X
+        if len(self.get_registered_locos()) == 0:
+            self.print_error(f"Found no locomotive registered!")
+            return
+        if locoid != '*':
+            if locoid not in self.get_registered_locos():
+                self.print_error(f"LocoID {locoid} is not registered!")
+                return
         print(f"OK EMERGENCY STOP requested for {locoid}")
         reg_data = f"MXA{locoid}<;>X"
         self.sendwt(reg_data)
+
+    def emergency_stop_keyboard(self):
+        onelocoid = self.select_registered_loco_keyboard()
+        if onelocoid is not None:
+            self.emergency_stop(onelocoid)           
 
     def throttleChangeNotification(self,tuple):
         # tuple is (client_code,locoid,property,value)
@@ -563,26 +728,31 @@ class wiThrottleManager(object):
 
 class Locomotive(object):
 
-    def __init__(self,locoid):
+    def __init__(self,locoid,isregistered=True):
         self.locoid = locoid # string like S2,S3,S8,L8504
-        self.speed = None # string
+        self.speed = None # string in ['-1','0'-'126']
         self.direction = None # string in ['0','1']
-        self.functions = {} # {'F0': '0', 'F1': '0', 'F2': '0', 'F3': '0',...}
-        self.f069 = f"{'x'*69}" # string representation of 69 functions managed by JMRI
-
-    def set_function(self,function_name='F0',function_state='0'):
-        self.functions[function_name] = function_state
-        function_index = int(function_name[1:])
-        self.f069 = self.f069[:function_index] + function_state + self.f069[function_index+1:]
-
-    # DCC-EX example : LocoId:8504 Dir:Reverse Speed:64 F0-28:11000000000000000000000000000
-    def display(self):
-        direction = 'Forward' if self.direction == '1' else 'Reverse'
-        print(f"|{self.locoid:.<5s}| {direction} |{self.speed:.>5s}| {self.f069}")
-        # print(f"{self.functions}")
+        self.f068 = f"{'x'*69}" # string representation of 69 functions managed by JMRI
+        self.registered = isregistered
 
     def __repr__(self) -> str:
         return f"Locomotive({self.locoid})"
+
+    def set_function(self,function_name='F0',function_state='0'):
+        function_index = int(function_name[1:])
+        self.f068 = self.f068[:function_index] + function_state + self.f068[function_index+1:]
+
+    # DCC-EX example : LocoId:8504 Dir:Reverse Speed:64 F0-28:11000000000000000000000000000
+    def display(self):
+        if self.registered:
+            direction = 'Forward' if self.direction == '1' else 'Reverse'
+            speed = self.speed
+            functions = self.f068
+        else:
+            direction = 'Unknown'
+            speed = '?'
+            functions = 'Unregistered locomotive'
+        print(f"|{self.locoid:.<5s}| {direction} |{speed:>5s}| {functions:<69} |")
 
 #################################################
 
@@ -595,7 +765,7 @@ def help(pwt):
     print(f"q:   Quit")
     print(f"h:   Help")
     print(f"v:   Verbose")
-    print(f"t:   display Throttle manager")
+    print(f"tm:  display Throttle Manager")
     print(f"r:   display Roster")
     print(f"add: (+) Add/register Loco within the throttle")
     print(f"rem: (-) Remove Loco from the throttle")
@@ -603,7 +773,7 @@ def help(pwt):
     print(f"cd:  Change Direction")
     print(f"pb:  Push Button function ")
     print(f"es:  Emergency Stop")
-    print(f"po:  Pouet")
+    print(f"po:  Pouet (L8504)")
     print(f"qs:  Query Speed (all locos)")
     print(f"qd:  Query Direction (all locos)")
     print(f"gs:  Get Speed value")
@@ -617,163 +787,72 @@ def help(pwt):
 if __name__ == '__main__':
 
     myverbose = False
-    pwt = wiThrottleManager("MraThrottle",TCP_IP,TCP_PORT,myverbose)
-    # pwt.register_throttle()
+    self = wiThrottleManager("MraThrottle",TCP_IP,TCP_PORT,myverbose)
     ev0 = threading.Event()
-    threading.Thread(target=wiThrottleManager.readwt,args=(pwt,ev0),name="wiThrottle").start()
-    # t4 = threading.Thread(target=readwt,args=(pwt,),name="wiThrottle").start()
-    # t4 = threading.Thread(target=wiThrottleManager.test,args=(pwt,),name="wiThrottle").start()
-    help(pwt)
+    threading.Thread(target=wiThrottleManager.readwt,args=(self,ev0),name="wiThrottle").start()
+    help(self)
     try:
         while True:
             print("")
-            # print(f"{scanning=}, event_is_set={ev0.is_set()}, threads={myThreads()}")
-            if len(pwt.registered_locos) == 0:
+            if len(self.get_registered_locos()) == 0:
                 print(f"{CRED}No locomotive registered!{CEND}")
             else:
-                print(f"{CGRE}Registered locomotives: {pwt.registered_locos}{CEND}")
-            cmd = input(">>> cmd (q,h,v,t,r,add,+,rem,-,cs,cd,pb,es,po,qs,qd,gs,gd,speed) >>>\n")
-
+                print(f"{CGRE}Registered locomotives: {self.get_registered_locos()}{CEND}")
+            cmd = input(">>> cmd (q,h,v,tm,r,add,+,rem,-,cs,cd,pb,es,po,qs,qd,gs,gd,speed) >>>\n")
             if len(cmd) > 0:
                 print(f"cmd is {cmd}")
+            # TODO: elif:
             if cmd in ['q','quit','exit']:
                 break
             if cmd in ['h','?','help']:
-                help(pwt)
+                help(self)
             if 'v' == cmd: # verbose
                 myverbose = not myverbose
                 print(f"OK Setting verbose to {myverbose}")
-                pwt.set_verbose(myverbose)
+                self.set_verbose(myverbose)
             if '1' == cmd:
-                scanning = False
                 ev0.set()
                 print("Stopping wiThrottle Thread...")
-            if 't' == cmd: # throttle
-                pwt.display()
+            if 'tm' == cmd: # throttle manager
+                self.display()
             if 'r' == cmd: # roster
-                pwt.print_roster()
-
+                self.print_roster()
             if cmd in ['add','+']: # register from roster
-                if len(pwt.rosterkeys) == 0:
-                    pwt.print_error(f"OUPS Roster empty!")
-                    continue
-                pwt.print_roster() # TODO: roster w/o registered locos...
-                txt = input(f"-> Loco Index [1-{len(pwt.rosterkeys)}]: ")
-                isn = re.match(r"\d+",txt)
-                if isn is None:
-                    pwt.print_error(f"OUPS Index not integer!")
-                    continue
-                num = int(txt)
-                if num < 1 or num > len(pwt.rosterkeys):
-                    pwt.print_error(f"OUPS Index {num} out of bounds!")
-                    continue
-                pwt.add_locomotive(pwt.rosterkeys[num-1])
-
-            if 'speed' in cmd: # speed L8504 64
-                regex = re.search(r"^speed\s+([SL]\d+)\s+(\d+)",cmd)
-                if regex is not None and len(regex.groups()) == 2:
-                    rdccad = regex.group(1) # requested loco dcc-address
-                    rspeed = int(regex.group(2)) # requested speed
-                    if rdccad not in pwt.rosterkeys:
-                        pwt.print_error(f"OUPS LocoID {rdccad} does not exist in the roster!")
-                        continue
-                    if rdccad not in pwt.registered_locos:
-                        pwt.print_error(f"OUPS LocoID {rdccad} not registered!")
-                        continue
-                    if rspeed < 0 or rspeed > 126:
-                        pwt.print_error(f"OUPS Requested speed {rspeed} out of bounds [0-126]!")
-                        continue
-                    else:
-                        pwt.set_speed(rdccad,rspeed)
-                else:
-                    pwt.print_error(f"OUPS Bad request! (use speed S|L<dcc-address> <requested-speed>)")
-
+                self.add_locomotive_keyboard()
+            if cmd in ['rem','-']: # remove loco from throttle
+                self.remove_locomotive_keyboard()
             if 'qs' == cmd: # query speed all locos
-                # could ne necessary to get up-to-date speed
-                # JMRI does not send regularly data about speed...
-                pwt.query_speed('*')
-
+                # could be necessary to get up-to-date speed
+                # because JMRI does not send regularly data about speed...
+                self.query_speed('*')
             if 'qd' == cmd: # query direction all locos
                 # JMRI sends regularly data about direction changes so is it really useful?
-                pwt.query_direction('*')
-
-            if cmd in ['rem','-','cs','cd','pb','es','po','gs','gd']:
-                if len(pwt.registered_locos) == 0:
-                    print("Please, register at least one locomotive!")
-                else:
-
-                    txt = input(f"-> Loco Index [1-{len(pwt.registered_locos)}]: ")
-                    isn = re.match(r"\d+",txt)
-                    if isn is None:
-                        pwt.print_error(f"OUPS Index not integer!")
-                        continue
-                    else:
-                        num = int(txt)
-                        if num < 1 or num > len(pwt.registered_locos):
-                            pwt.print_error(f"OUPS Index {num} out of bounds!")
-                            continue
-
-                    onelocoid = pwt.registered_locos[num-1]
-                    
-                    if cmd in ['rem','-']: # remove loco from throttle
-                        pwt.remove_locomotive(onelocoid)
-                    if 'cs' == cmd: # change speed
-                        txt = input(f"-> Speed [0-126]: ")
-                        isn = re.match(r"\d+",txt)
-                        if isn is None:
-                            pwt.print_error(f"OUPS Speed not integer!")
-                            continue
-                        else:
-                            num = int(txt)
-                            if num < 0 or num > 126:
-                                pwt.print_error(f"OUPS Speed {num} out of bounds!")
-                                continue
-                        pwt.set_speed(onelocoid,num)
-                    if 'pb' == cmd: # push button (to switch-on AND to switch-off)
-                        # SET (1) is relevant for switch buttons AND for push buttons !
-                        # if one send push two times, JMRI does send push first and release second
-                        # the same for switchs and push buttons
-                        txt = input(f"-> Push button [0-28] : ")
-                        isn = re.match(r"\d+",txt)
-                        if isn is None:
-                            pwt.print_error(f"OUPS Button not integer!")
-                            continue
-                        else:
-                            num = int(txt)
-                            if num < 0 or num > 28:
-                                pwt.print_error(f"OUPS Button {num} out of bounds!")
-                                continue
-                        pwt.set_function(onelocoid,num,1)
-                        time.sleep(1)
-                        pwt.set_function(onelocoid,num,0)
-                    if 'po' == cmd: # pouet on/off
-                        pwt.set_function(onelocoid,2,1)
-                        time.sleep(1)
-                        pwt.set_function(onelocoid,2,0)
-                    if 'gs' == cmd: # get speed
-                        print(pwt.get_speed(onelocoid))
-                    if 'gd' == cmd: # get direction
-                        print(pwt.get_direction(onelocoid))
-                    if 'es' == cmd: # emergency stop
-                        pwt.emergency_stop(onelocoid)           
-                    if 'cd' == cmd: # change direction
-                        txt = input(f"-> Direction (f:Forward or r:Reverse) : ")
-                        if txt not in ['f','r']:
-                            pwt.print_error(f"OUPS Direction \'{txt}\' out of bounds!")
-                            continue
-                        # rdir = 1 if txt == 'f' else 0
-                        pwt.set_direction(onelocoid,1 if txt == 'f' else 0)
+                self.query_direction('*')
+            if 'cs' == cmd: # change speed
+                self.set_speed_keyboard()
+            if 'pb' == cmd: # push button (to switch-on AND to switch-off)
+                self.set_function_keyboard()
+            if 'po' == cmd: # pouet on/off reserved for L8504 for testing purpose
+                self.set_function_push_release("L8504",2)
+            if 'gs' == cmd: # get speed
+                self.get_speed_keyboard()
+            if 'gd' == cmd: # get direction
+                self.get_direction_keyboard()
+            if 'es' == cmd: # emergency stop
+                self.emergency_stop_keyboard()          
+            if 'cd' == cmd: # change direction
+                self.set_direction_keyboard()
+            if 'speed' in cmd: # speed L8504 64
+                self.set_speed_keyboard_command()
 
     except KeyboardInterrupt:
         print("\nCTRL-C received")
-    scanning = False
     ev0.set()
-    pwt.disconnectwt()
-    if pwt.connected is False:
+    self.disconnectwt()
+    if self.connected is False:
         print(f"Throttle disconnected and socket closed")
     else:
-        pwt.print_error(f"WARNING: socket not closed")
+        self.print_error(f"WARNING: socket not closed")
     time.sleep(1)
-    # print(f"{scanning=}, threads={myThreads()}")
-    print(f"{scanning=}, event_is_set={ev0.is_set()}, threads={myThreads()}")
+    print(f"stop={ev0.is_set()}, threads={myThreads()}")
     sys.exit("EXIT")
